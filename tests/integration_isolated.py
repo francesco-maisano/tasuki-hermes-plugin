@@ -2,7 +2,7 @@
 """End-to-end proof in an ISOLATED Hermes (throwaway HERMES_HOME and HOME, spare ports, stub model, fake tasuki server).
 
 It does exactly what the iOS app will do against a real dashboard: password login -> token -> install the plugin from a
-local Git repo through POST /api/dashboard/agent-plugins/install (enable:true) -> pair through /api/plugins/tasuki/pair ->
+local Git repo through POST /api/dashboard/agent-plugins/install (enable:true) -> connect with the owner claim secret (/connect: 409 when none is known, body, legacy /pair, local file) -> enrol a phone (/enroll-device) ->
 push a delegation through the fake tasuki server -> stream events back, cancel, restart, unpair.
 
 SAFETY: never touches ~/.hermes, port 9119 or any running service. The caller's own HERMES_HOME is ignored: the dashboard
@@ -95,6 +95,7 @@ class Env:
             f"model:\n  default: stub-model\n  provider: custom\n  base_url: http://127.0.0.1:{PORT_MODEL}/v1\n  api_key: stub-key\n")
         self.user, self.pw = "tester", secrets.token_urlsafe(18)
         self.secret = secrets.token_hex(32)
+        self.claim_file = self.dir / "claimdir" / "claim.secret"
         self.procs: list = []
         self.dash: subprocess.Popen | None = None
 
@@ -106,6 +107,7 @@ class Env:
 
     def start_dashboard(self):
         env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin", "HERMES_HOME": str(self.hh),
+               "TASUKI_CLAIM_FILES": str(self.claim_file),      # never look at this machine's real claim.secret locations
                "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": self.user, "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": self.pw,
                "HERMES_DASHBOARD_BASIC_AUTH_SECRET": self.secret}
         log = open(self.dir / "dashboard.log", "ab")
@@ -224,28 +226,103 @@ def main() -> int:
         s, j, _ = http("GET", "/api/plugins/tasuki/status", headers=COOKIE)
         check("status also works with the cookie", s == 200)
 
-        # ---- 3. pairing ----
+        # ---- 3. connect with the claim secret, enrol a phone, legacy pairing ----
+        claim_secret = "claim-" + secrets.token_hex(24)            # a marker we can grep for
+        fake.claim.claim_secret = claim_secret
+        s, j, _ = http("GET", "/api/plugins/tasuki/status", headers=BEARER)
+        check("status advertises the onboarding features and is not claimed",
+              j.get("features") == ["claim", "enroll_device", "pair_legacy"] and j.get("claimed") is False and j.get("enroll_available") is False, json.dumps(j)[:300])
+        s, j, _ = http("POST", "/api/plugins/tasuki/connect", {"server_url": fake.url}, headers=BEARER)
+        report["connect_secret_needed"] = {"status": s, "body": j}
+        check("connect without any known claim secret is 409 claim_secret_needed", s == 409 and j["detail"]["code"] == "claim_secret_needed"
+              and "claim.secret" in j["detail"]["message"], str(j))
+        check("the fake core was not called without a secret", fake.claim.claim_attempts == [])
+        s, j, _ = http("POST", "/api/plugins/tasuki/connect", {"server_url": fake.url, "claim_secret": "wrong"}, headers=BEARER)
+        report["connect_invalid_secret"] = {"status": s, "body": j}
+        check("a wrong claim secret is 400 invalid_secret with a friendly message", s == 400 and j["detail"]["code"] == "invalid_secret", str(j))
+        s, j, _ = http("POST", "/api/plugins/tasuki/connect", {"server_url": "http://example.com", "claim_secret": "x"}, headers=BEARER)
+        check("connect refuses a non-https non-local server", s == 400 and j["detail"]["code"] == "insecure_server_url", str(j))
+        s, j, _ = http("POST", "/api/plugins/tasuki/enroll-device", {"device_name": "x"}, headers=BEARER)
+        report["enroll_not_paired"] = {"status": s, "body": j}
+        check("enroll-device before connecting is 409 not_paired", s == 409 and j["detail"]["code"] == "not_paired", str(j))
+        s, j, _ = http("POST", "/api/plugins/tasuki/enroll-device", {"device_name": "x"})
+        check("enroll-device is dashboard-authenticated (401 without a login)", s == 401, str(s))
+        s, j, _ = http("POST", "/api/plugins/tasuki/connect", {"server_url": fake.url, "claim_secret": claim_secret})
+        check("connect is dashboard-authenticated (401 without a login)", s == 401, str(s))
+        fake.protocol = 2
+        s, j, _ = http("POST", "/api/plugins/tasuki/connect", {"server_url": fake.url, "claim_secret": claim_secret}, headers=BEARER)
+        check("protocol mismatch on connect is 409, stores nothing and revokes the agent it just created",
+              s == 409 and j["detail"]["code"] == "protocol_mismatch" and not (env.hh / "state/tasuki/state.json").exists() and fake.self_revokes == 1, str(j))
+        fake.protocol = 1
+        fake.self_revokes = 0
+        fake.revoked_bearers.clear()
+        s, j, _ = http("POST", "/api/plugins/tasuki/connect", {"server_url": fake.url + "/", "claim_secret": claim_secret}, headers=BEARER)
+        report["connect_ok"] = redact({"status": s, "body": j})
+        check("connect with claim_secret in the body is ok (claimed, source body, enrol available, worker running)",
+              s == 200 and j.get("paired") and j.get("claimed") and j.get("claim_source") == "body" and j.get("enroll_available")
+              and j["worker"]["running"] and j["agent_id"] == fake.agent_id and j["server"]["origin"] == fake.url, json.dumps(j)[:400])
+        check("connect never echoes the claim secret or the token", claim_secret not in json.dumps(j) and fake.token not in json.dumps(j))
+        env_file = (env.hh / ".env").read_text()
+        check("token is in Hermes' secret store (.env, mode 0600); the claim secret is not (remember not asked)",
+              "TASUKI_AGENT_TOKEN" in env_file and "TASUKI_CLAIM_SECRET" not in env_file and claim_secret not in env_file
+              and oct((env.hh / ".env").stat().st_mode & 0o777) == "0o600")
+        s, j, _ = http("POST", "/api/plugins/tasuki/enroll-device", {"device_name": "Test phone"}, headers=BEARER)
+        report["enroll_ok"] = {"status": s, "body": j}
+        check("enroll-device returns {code, expires_at, server_url}", s == 200 and set(j) == {"code", "expires_at", "server_url"}
+              and re.fullmatch(r"[A-Z0-9]{4}-[A-Z0-9]{4}", j["code"]) and j["server_url"] == fake.url, str(j))
+        first_code = j["code"]
+        check("the device name reached the core", fake.claim.device_code_calls and fake.claim.device_code_calls[-1][1] == {"device_name": "Test phone"})
+        s, j, _ = http("POST", "/api/plugins/tasuki/enroll-device", {}, headers=BEARER)
+        check("a second enrolment mints a different code", s == 200 and j["code"] != first_code, str(j))
+        s, j, _ = http("POST", "/api/plugins/tasuki/enroll-device", {}, headers=BEARER)
+        s4, j4, _ = http("POST", "/api/plugins/tasuki/enroll-device", {}, headers=BEARER)
+        report["enroll_rate_limited"] = {"status": s4, "body": j4}
+        check("the core's rate limit (3 per 10 min) surfaces as 429 rate_limited", s == 200 and s4 == 429 and j4["detail"]["code"] == "rate_limited", str(j4))
+        s, j, _ = http("POST", "/api/plugins/tasuki/connect", {"server_url": fake.url, "claim_secret": claim_secret, "remember": False}, headers=BEARER)
+        check("re-connect is idempotent: new token, still one worker", s == 200 and j["worker"]["running"] and len(fake.claim.device_code_calls) == 3, str(j)[:200])
+        check("re-connect replaced the token in place (the real core: same agent id, old token dead, nothing left to revoke)", len(fake.revoked_bearers) == 0, str([b[:6] for b in fake.revoked_bearers]))
+
+        # legacy pairing still works (and is not a claim connection)
         s, j, _ = http("POST", "/api/plugins/tasuki/pair", {"server_url": fake.url, "code": "nope"}, headers=BEARER)
-        check("bad pairing code surfaces as 400 bad_code", s == 400 and j["detail"]["code"] == "bad_code", str(j))
+        check("[legacy] bad pairing code surfaces as 400 bad_code", s == 400 and j["detail"]["code"] == "bad_code", str(j))
         report["pair_bad_code"] = {"status": s, "body": j}
         fake.protocol = 2
         s, j, _ = http("POST", "/api/plugins/tasuki/pair", {"server_url": fake.url, "code": "PAIR-1234"}, headers=BEARER)
-        check("protocol mismatch is 409 and stores nothing", s == 409 and j["detail"]["code"] == "protocol_mismatch" and not (env.hh / "state/tasuki/state.json").exists(), str(j))
+        check("[legacy] protocol mismatch is 409", s == 409 and j["detail"]["code"] == "protocol_mismatch", str(j))
         report["pair_protocol_mismatch"] = {"status": s, "body": j}
         fake.protocol = 1
-        s, j, _ = http("POST", "/api/plugins/tasuki/pair", {"server_url": "http://example.com", "code": "x"}, headers=BEARER)
-        check("non-https non-local server is refused", s == 400 and j["detail"]["code"] == "insecure_server_url", str(j))
         s, j, _ = http("POST", "/api/plugins/tasuki/pair", {"server_url": fake.url, "code": "PAIR-1234"}, headers=BEARER)
         report["pair_ok"] = redact({"status": s, "body": j})
-        check("pair ok", s == 200 and j.get("paired") and j.get("agent_id") == fake.agent_id and "delegate" in j.get("scopes", []), json.dumps(j)[:300])
-        env_file = (env.hh / ".env").read_text()
-        check("token is in Hermes' secret store (.env, mode 0600)", f"TASUKI_AGENT_TOKEN" in env_file and oct((env.hh / ".env").stat().st_mode & 0o777) == "0o600")
-        leaks = [str(p) for p in env.dir.rglob("*") if p.is_file() and p.name != ".env" and "runtime" not in p.parts and ".venv" not in p.parts
-                 and "uv" not in p.parts and p.stat().st_size < 5_000_000 and fake.token.encode() in p.read_bytes()]
-        check("no file other than .env contains the token", not leaks, str(leaks[:3]))
-        check("the token never appears in any API response", fake.token not in json.dumps(report))
+        check("[legacy] pair ok", s == 200 and j.get("paired") and j.get("agent_id") == fake.agent_id and "delegate" in j.get("scopes", []), json.dumps(j)[:300])
         s, st, _ = http("GET", "/api/plugins/tasuki/status", headers=BEARER)
-        check("status after pairing", st["paired"] and st["worker"]["running"] and st["agent_id"] == fake.agent_id and st["server"]["origin"] == fake.url, json.dumps(st)[:300])
+        check("[legacy] pairing shows claimed:false, enroll_available:false", st["paired"] and st["claimed"] is False and st["enroll_available"] is False, json.dumps(st)[:300])
+        s, j, _ = http("POST", "/api/plugins/tasuki/enroll-device", {}, headers=BEARER)
+        check("[legacy] enroll-device is refused (409 missing_scope)", s == 409 and j["detail"]["code"] == "missing_scope", str(j))
+
+        # connect again, now from the local claim.secret file (no secret in the request)
+        env.claim_file.parent.mkdir(parents=True, exist_ok=True)
+        env.claim_file.write_text(claim_secret + "\n")
+        os.chmod(env.claim_file, 0o600)
+        s, j, _ = http("POST", "/api/plugins/tasuki/connect", {"server_url": fake.url}, headers=BEARER)
+        report["connect_from_file"] = redact({"status": s, "body": {k: j.get(k) for k in ("paired", "claimed", "claim_source", "enroll_available")}})
+        check("connect with no body secret reads the local claim.secret file", s == 200 and j.get("claim_source") == "file" and j.get("claimed"), json.dumps(j)[:300])
+        s, j, _ = http("POST", "/api/plugins/tasuki/enroll-device", {}, headers=BEARER)
+        check("enrol works again after the claim connection replaced the legacy pairing", s == 200 or (s == 429 and j["detail"]["code"] == "rate_limited"), str(j))
+        def holds(p, needle: bytes) -> bool:         # a live sqlite -shm/-wal file can vanish while we walk the tree: that is not a leak
+            try:
+                return p.is_file() and p.stat().st_size < 5_000_000 and needle in p.read_bytes()
+            except OSError:
+                return False
+        leaks = [str(p) for p in env.dir.rglob("*") if p != env.claim_file and "runtime" not in p.parts and ".venv" not in p.parts
+                 and "uv" not in p.parts and holds(p, claim_secret.encode())]
+        check("no file (logs, state, .env, config) other than claim.secret itself contains the claim secret", not leaks, str(leaks[:3]))
+        leaks = [str(p) for p in env.dir.rglob("*") if p.name != ".env" and "runtime" not in p.parts and ".venv" not in p.parts
+                 and "uv" not in p.parts and holds(p, fake.token.encode())]
+        check("no file other than .env contains the agent token", not leaks, str(leaks[:3]))
+        check("the tokens and the claim secret never appear in any recorded response", fake.token not in json.dumps(report) and claim_secret not in json.dumps(report))
+        s, st, _ = http("GET", "/api/plugins/tasuki/status", headers=BEARER)
+        check("status after connecting", st["paired"] and st["claimed"] and st["enroll_available"] and st["worker"]["running"]
+              and st["agent_id"] == fake.agent_id and st["server"]["origin"] == fake.url, json.dumps(st)[:300])
         report["status_paired"] = st
 
         # ---- 4. a delegation runs in the main Hermes (no second hermes serve) ----
@@ -299,15 +376,16 @@ def main() -> int:
             if s == 200 and st["worker"]["running"]:
                 break
             time.sleep(1)
-        check("after a dashboard restart the pairing persists and the worker resumes by itself", s == 200 and st["paired"] and st["worker"]["running"], json.dumps(st)[:300])
+        check("after a dashboard restart the pairing persists and the worker resumes by itself", s == 200 and st["paired"] and st["claimed"] and st["worker"]["running"], json.dumps(st)[:300])
         did = fake.push("hello after restart", surface="chat", session_key="it-3")
         ev = fake.wait_events(did, timeout=60)
         check("a delegation after the restart is served", ev and ev[-1]["type"] == "final", str(ev[-1:]))
 
         # ---- 7. unpair ----
+        self_revokes_before = fake.self_revokes
         s, j, _ = http("POST", "/api/plugins/tasuki/unpair", headers=BEARER)
         report["unpair"] = {"status": s, "body": j}
-        check("unpair", s == 200 and j == {"paired": False, "was_paired": True, "server_revoked": True} and fake.self_revokes == 1, str(j))
+        check("unpair", s == 200 and j == {"paired": False, "was_paired": True, "server_revoked": True} and fake.self_revokes == self_revokes_before + 1, str(j))
         s, st, _ = http("GET", "/api/plugins/tasuki/status", headers=BEARER)
         check("status after unpair", not st["paired"] and not st["worker"]["running"])
         check("token removed from .env", "TASUKI_AGENT_TOKEN" not in (env.hh / ".env").read_text())

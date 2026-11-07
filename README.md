@@ -4,13 +4,13 @@ The agent-side half of tasuki's **Agent Gateway**. Installed into *your own* Her
 Hermes' dashboard API, or by hand), it lets the tasuki app hand a request to your main Hermes and hear the answer
 stream back, and it gives Hermes read-only tools for your mail, calendar and food log, and keeps a read-only markdown copy of your tasks inside the Hermes data directory (plus an inbox folder that turns dropped files into tasks).
 
-Version `0.2.0`, protocol version `1`. Native Hermes plugin (`plugin.yaml` + `register(ctx)`), MIT.
+Version `0.3.0`, protocol version `1`. Native Hermes plugin (`plugin.yaml` + `register(ctx)`), MIT.
 
 ## What it does
 
 | Part | Where | What |
 |---|---|---|
-| Pairing, status and config routes | `dashboard/plugin_api.py` | `POST /api/plugins/tasuki/pair`, `GET /status`, `POST /unpair`, `POST /config` (mirror directory), `POST /mirror/resync` on Hermes' dashboard. Need the dashboard login. |
+| Connect, enrol, status and config routes | `dashboard/plugin_api.py` | `POST /api/plugins/tasuki/connect` (owner claim secret), `POST /enroll-device` (one-time phone code), `POST /pair` (legacy code), `GET /status`, `POST /unpair`, `POST /config` (mirror directory), `POST /mirror/resync` on Hermes' dashboard. Need the dashboard login. |
 | Delegation worker | `core/worker.py` | Long-polls tasuki for delegations and runs each in your main Hermes, streaming `speakable` / `progress` / `commentary` / `final` / `proposal` / `error` events back. Heartbeat every 10 s, cancel honoured, reconnects with backoff. Runs **inside the dashboard process**: no second `hermes serve`. |
 | Data tools | `core/tools.py`, `__init__.py` | 12 tools, all prefixed `tasuki_` (below). |
 | Task mirror | `core/mirror.py` | One-way markdown mirror of your tasks under `<HERMES_HOME>/tasuki/` (configurable): one file per open task, `done/YYYY-MM/`, four views, a README, a state file. Follows tasuki's change feed with the agent token; runs only while paired. See "The task mirror and inbox". |
@@ -97,25 +97,48 @@ hermes dashboard                                                            # th
 
 Hermes' install scan reports this plugin `safe`; it is installed from an unreviewed custom source, so Hermes says so.
 
-## Pair
+## Upgrading from 0.2.0
+
+A plugin installed with a pinned `ref` is not moved by `POST /api/dashboard/agent-plugins/tasuki/update` (Hermes answers `400 ... pinned`). Re-install over it:
+`hermes plugins install francesco-maisano/tasuki-hermes-plugin --force --ref <40-char SHA of the release>` (or the same through `POST /api/dashboard/agent-plugins/install` with `force:true`).
+A running dashboard keeps serving the old routes after that (no `/connect`, `/status` still says 0.2.0), and disable/enable does not change that: **restart the dashboard** (`systemctl --user restart hermes-dashboard.service` where it runs as a service). A paired connection resumes by itself.
+
+## Connect and enrol a phone (no tasuki sign-in)
+
+There is no tasuki account to sign in to. Your phone's identity comes from controlling your Hermes: the app logs into the Hermes dashboard,
+installs this plugin, tells it to **connect** to your tasuki server, then asks it to **enrol** the phone.
+
+The connection uses the tasuki server's **claim secret**, a long random string the server generates once and keeps in `claim.secret` in its data
+directory. The plugin finds it, in this order: the request body (`claim_secret`), Hermes' secret store (`TASUKI_CLAIM_SECRET`), a local
+file (config key `claim_file`, else `~/tasuki-data/claim.secret`, `/var/lib/tasuki/claim.secret`, `/etc/tasuki/claim.secret`). If Hermes runs on
+the same machine as tasuki it just works; otherwise the call answers `409 claim_secret_needed` and you paste the secret once. It is kept only if you send
+`remember:true`. A claim file that others can write, or that everyone can read and someone else owns, is refused; world-readable but yours is used with a log
+warning (`chmod 600` it). The secret is never logged, returned, or written by the plugin.
 
 ```sh
-# in the tasuki app: Settings > Agents > Hermes shows a one-time code
-curl -H "Authorization: Bearer <dashboard access token>" -H 'Content-Type: application/json' \
-  -X POST http://127.0.0.1:9119/api/plugins/tasuki/pair -d '{"server_url":"https://app.usetasuki.com","code":"PAIR-1234"}'
-curl -H "Authorization: Bearer <dashboard access token>" http://127.0.0.1:9119/api/plugins/tasuki/status
+T="Authorization: Bearer <dashboard access token>"
+curl -H "$T" -H 'Content-Type: application/json' -X POST http://127.0.0.1:9119/api/plugins/tasuki/connect \
+  -d '{"server_url":"https://app.usetasuki.com"}'                       # add "claim_secret":"..." (and "remember":true) if it answers 409 claim_secret_needed
+curl -H "$T" -H 'Content-Type: application/json' -X POST http://127.0.0.1:9119/api/plugins/tasuki/enroll-device \
+  -d '{"device_name":"My iPhone"}'                                      # -> {"code":"ABCD-EFGH","expires_at":"...","server_url":"..."}
+curl -H "$T" http://127.0.0.1:9119/api/plugins/tasuki/status
 ```
 
-`server_url` must be `https://` (plain `http://` only for localhost, for development). The pair call refuses a server
-that speaks a different `protocol_version`; `GET /status` carries `version` and `protocol_version` so the app or the server
-can refuse a mismatch the other way round.
+The claim returns an agent token with the assistant scopes plus `enroll_device`, which the plugin stores exactly like a pairing token. Connecting
+again replaces the token (and revokes the old agent on the server). Enrolment codes are one-time and last about 5 minutes; the plugin allows 5 per 10 minutes
+(the server allows 3). `GET /status` gives `claimed`, `enroll_available`, `server` and `features` (`claim`, `enroll_device`, `pair_legacy`).
+
+**Legacy pairing** (`POST /pair {"server_url","code"}` with a code from the tasuki app) still works. It has no `enroll_device` scope, so it cannot enrol a phone.
+
+`server_url` must be `https://` (plain `http://` only for localhost, for development). Both flows refuse a server that speaks a different `protocol_version`.
+Contract and error table: `docs/AGENTS_HERMES.md`.
 
 ## Security
 
 * **Token storage:** the agent token (`ts_...`) is written with Hermes' own secret writer to `$HERMES_HOME/.env`
-  (`TASUKI_AGENT_TOKEN`, mode 0600, per profile), never into the plugin directory, the repo, `config.yaml` or the state file.
+  (`TASUKI_AGENT_TOKEN`, mode 0600, per profile; the optional remembered claim secret is `TASUKI_CLAIM_SECRET` in the same file), never into the plugin directory, the repo, `config.yaml` or the state file.
   Non-secret facts (server, agent id, scopes) are in `$HERMES_HOME/state/tasuki/state.json` (0600). Nothing is logged except
-  delegation ids, counts and short codes: no delegation text, reply text, token or pairing code.
+  delegation ids, counts and short codes: no delegation text, reply text, token, pairing code, claim secret or enrolment code.
 * **Routes** need the dashboard credential (and the plugin checks it again, failing closed). They only exist while the
   plugin is installed **and** in `plugins.enabled` (Hermes' own trust gate).
 * **Bearer discipline:** the HTTP client follows no redirects and verifies TLS.
@@ -130,7 +153,7 @@ can refuse a mismatch the other way round.
 
 ```sh
 cd hermes-plugin
-python3 -m unittest discover -s tests          # 100+ tests, no Hermes needed (fake tasuki server, fake change feed, fake Hermes gateway)
+python3 -m unittest discover -s tests          # 130+ tests, no Hermes needed (fake tasuki server, fake change feed, fake Hermes gateway)
 hermes plugins validate .                      # Hermes' own admission checks
 tests/integration_isolated.sh fake             # plugin + throwaway Hermes against fake_tasuki (3-5 min; never touches your live Hermes)
 tests/integration_isolated.sh chain            # the REAL chain: throwaway tasuki core + throwaway bridge + throwaway Hermes + the task mirror

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 TOKEN_KEY = "TASUKI_AGENT_TOKEN"
+CLAIM_KEY = "TASUKI_CLAIM_SECRET"      # optional: the owner claim secret, kept only when the user asked (remember:true) or set it by hand
 
 
 def hermes_home() -> Path:
@@ -86,6 +87,7 @@ class Pairing:
     agent_id: str = ""
     scopes: list = field(default_factory=list)
     paired_at: float = 0.0
+    claimed: bool = False          # true when this connection was made with the owner claim secret (not a legacy pairing code)
 
 
 class PairingStore:
@@ -112,7 +114,7 @@ class PairingStore:
         if not token or not isinstance(meta, dict) or not meta.get("server"):
             return None
         return Pairing(server=str(meta["server"]), token=token, agent_id=str(meta.get("agent_id") or ""),
-                       scopes=list(meta.get("scopes") or []), paired_at=float(meta.get("paired_at") or 0))
+                       scopes=list(meta.get("scopes") or []), paired_at=float(meta.get("paired_at") or 0), claimed=bool(meta.get("claimed")))
 
     def save(self, p: Pairing) -> None:
         with self._lock:
@@ -120,7 +122,7 @@ class PairingStore:
             self.dir.mkdir(parents=True, exist_ok=True)
             os.chmod(self.dir, 0o700)
             body = json.dumps({"server": p.server, "agent_id": p.agent_id, "scopes": p.scopes,
-                               "paired_at": p.paired_at or time.time()})
+                               "paired_at": p.paired_at or time.time(), "claimed": bool(p.claimed)})
             fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".state-")
             try:
                 with os.fdopen(fd, "w") as f:

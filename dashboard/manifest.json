@@ -2,7 +2,7 @@
   "name": "tasuki",
   "label": "Tasuki",
   "description": "Pairing and status routes for the Tasuki Agent Gateway (no UI tab).",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "tab": { "hidden": true },
   "api": "plugin_api.py"
 }

@@ -3,6 +3,7 @@
 It answers the calls the mirror makes through ``HttpClient.request(method, path, body, query, timeout, auth, headers)``:
   GET /api/v1/changes?format=events&since=now|c_N&limit&view&wait   (events in cursor order, has_more, reset)
   GET /api/v1/today, GET /api/v1/tasks (status, sort, order, limit, cursor), GET /api/v1/tasks/{id}, GET /api/v1/tasks/{id}/comments
+  POST /api/v1/owner/claim, POST /api/v1/agents/me/device-codes (claim_logic.ClaimLogic: wrong secret, lockout, rate limits)
   POST /api/v1/tasks (the inbox) with Idempotency-Key replay and the core's validation errors
 Mutators (``create``, ``update``, ``complete``, ``reopen``, ``delete``, ``comment``) append feed events shaped like docs CHANGES_FEED.md
 (``after`` is the task WITHOUT comment_count, like the real stored snapshot; deletes are tombstones).
@@ -14,6 +15,7 @@ import json
 import threading
 from typing import Optional
 
+from claim_logic import ClaimLogic
 import helpers  # noqa: F401  (loads the core under its module name)
 from _tasuki_hermes_core.client import TasukiError
 
@@ -33,6 +35,8 @@ class FakeCore:
         self.reset_next = False
         self.fail: Optional[TasukiError] = None
         self.fail_times = 0
+        self.claim = ClaimLogic()
+        self.agent_token: Optional[str] = None      # set by a claim; device-codes then needs auth=True
         self.timezone = "Australia/Perth"
         self.today = "2026-11-07"
 
@@ -102,6 +106,13 @@ class FakeCore:
             if self.fail is not None and self.fail_times != 0:
                 self.fail_times -= 1
                 raise self.fail
+        if method == "POST" and path == "/api/v1/owner/claim":
+            status, out = self.claim.claim(body or {}, self._new_agent)
+            return self._answer(status, out)
+        if method == "POST" and path == "/api/v1/agents/me/device-codes":
+            if not auth or not self.agent_token:
+                raise TasukiError("bad or missing token", 401, "unauthenticated")
+            return self._answer(*self.claim.device_code(body or {}, ["enroll_device"]))
         if method == "GET" and path == "/api/v1/changes":
             return self._changes(q)
         if method == "GET" and path == "/api/v1/today":
@@ -119,6 +130,16 @@ class FakeCore:
         if method == "POST" and path == "/api/v1/tasks":
             return self._post(body or {}, headers or {})
         raise TasukiError("no such route in the fake", 404, "http_404")
+
+    def _new_agent(self):
+        self.agent_token = "ts_" + __import__("uuid").uuid4().hex
+        return "agent_fake", self.agent_token, "http://fake.invalid", 1
+
+    @staticmethod
+    def _answer(status, out):
+        if status >= 400:
+            raise TasukiError(out["message"], status, out["code"])
+        return out
 
     def _changes(self, q):
         since = q.get("since")

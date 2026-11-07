@@ -11,6 +11,8 @@ Contract implemented (JSON, errors as {"error":{"code","message"}}):
   POST /api/v1/delegations/{id}/events           Bearer    {seq,type,text?,data?} idempotent by seq; lease must be held
   DELETE /api/v1/agents/me                       Bearer    the agent revokes itself -> {ok, revoked, agent_id}; the token is dead afterwards
   GET  /bridge/...                               Bearer    canned mail / calendar / food data (docs/BRIDGE.md shapes; ?format=agent gives the agent wrapper)
+  POST /api/v1/owner/claim                       no auth   {claim_secret, agent} -> {agent_id, token, scopes (+enroll_device), owner, server}  (claim_logic.py)
+  POST /api/v1/agents/me/device-codes            Bearer+enroll_device  {device_name?} -> {code, expires_at}; 3 per 10 min
 Test control (no auth, loopback): POST /_ctl/push {text,context?,screen_context?,source?,surface?,session_key?}
   POST /_ctl/cancel {id} | POST /_ctl/revoke | GET /_ctl/events?id= | GET /_ctl/requests
 In-process: FakeTasuki().start() ... .push(...), .cancel(id), .events(id), .stop().
@@ -24,6 +26,8 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
+
+from claim_logic import ClaimLogic
 
 MAIL_ACCOUNTS = {"accounts": [{"id": "work", "label": "Work (Integrated ICT)"}, {"id": "home", "label": "Personal Gmail"}]}
 CONVERSATIONS = {"folder": "inbox", "filter": "all", "next_cursor": None, "engine": "unified", "partial": False,
@@ -109,6 +113,10 @@ class FakeTasuki:
         self.self_revokes = 0
         self.fail_revoke = False
         self.fail_next_events = 0          # test hook: answer 503 to the next N event posts
+        self.claim = ClaimLogic()          # owner/claim + device-codes (lockout, wrong secret, rate limit)
+        self.extra_valid: set = set()      # tokens replaced by a newer claim: still alive on the server until they are DELETEd
+        self.scopes: list = []             # scopes of the current token when it came from a claim (empty = a legacy pairing)
+        self.revoked_bearers: list = []
         self.cv = threading.Condition()
         self._srv = ThreadingHTTPServer(("127.0.0.1", port), self._handler())
         self._srv.daemon_threads = True
@@ -140,6 +148,18 @@ class FakeTasuki:
     def cancel(self, did: str) -> None:
         with self.cv:
             self.cancelled.add(did)
+
+    def new_claimed_agent(self):
+        """A claim replaces the token of the agent with the same name IN PLACE, exactly like the real core (cloud/docs/ENROLLMENT.md section 2): the
+        agent id stays, the OLD token is dead at once (found by the real-core run, tests/integration_chain2.py). A revoked or never-claimed agent gets a new id."""
+        with self.cv:
+            same = bool(self.agent_id) and not self.revoked and bool(self.scopes)
+            self.token = "ts_" + uuid.uuid4().hex
+            if not same:
+                self.agent_id = "agent_" + uuid.uuid4().hex[:8]
+            self.revoked = False
+            self.scopes = ["read", "delegate", "enroll_device"]
+        return self.agent_id, self.token, f"http://127.0.0.1:{self.port}", self.protocol
 
     def revoke(self) -> None:
         with self.cv:
@@ -190,7 +210,8 @@ class FakeTasuki:
                     return {}
 
             def _authed(self):
-                ok = self.headers.get("Authorization") == "Bearer " + outer.token and not outer.revoked
+                bearer = (self.headers.get("Authorization") or "")[7:]
+                ok = (bearer == outer.token and not outer.revoked) or bearer in outer.extra_valid
                 if not ok:
                     self._err(401, "unauthenticated", "bad or revoked token")
                 return ok
@@ -220,13 +241,24 @@ class FakeTasuki:
                                             "scopes": ["read", "suggest", "write", "comment", "complete", "delete", "undo", "delegate", "mail:read",
                                                        "mail:draft", "calendar:read", "food:read"],
                                             "server": {"origin": f"http://127.0.0.1:{outer.port}", "protocol_version": outer.protocol}})
+                if method == "POST" and path == "/api/v1/owner/claim":
+                    return self._send(*outer.claim.claim(self._body(), outer.new_claimed_agent))
                 if not self._authed():
                     return
+                if method == "POST" and path == "/api/v1/agents/me/device-codes":
+                    bearer = (self.headers.get("Authorization") or "")[7:]
+                    scopes = outer.scopes if bearer == outer.token else ["enroll_device"]
+                    return self._send(*outer.claim.device_code(self._body(), scopes))
                 if method == "DELETE" and path == "/api/v1/agents/me":
                     outer.self_revokes += 1
                     if outer.fail_revoke:
                         return self._err(503, "unavailable", "try again")
-                    outer.revoke()
+                    bearer = (self.headers.get("Authorization") or "")[7:]
+                    outer.revoked_bearers.append(bearer)
+                    if bearer in outer.extra_valid:
+                        outer.extra_valid.discard(bearer)
+                    else:
+                        outer.revoke()
                     return self._send(200, {"ok": True, "revoked": True, "agent_id": outer.agent_id})
                 if method == "GET" and path == "/api/v1/agents/me/delegations/next":
                     wait = min(float(q.get("wait") or 0), outer.max_wait)
@@ -317,9 +349,12 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--code", default="PAIR-1234")
     ap.add_argument("--protocol", type=int, default=1)
+    ap.add_argument("--claim-secret", default="CLAIM-SECRET-FAKE")
     ap.add_argument("--max-wait", type=float, default=25.0)
     a = ap.parse_args()
-    f = FakeTasuki(a.port, a.code, a.protocol, a.max_wait).start()
+    f = FakeTasuki(a.port, a.code, a.protocol, a.max_wait)
+    f.claim.claim_secret = a.claim_secret
+    f.start()
     print(f"fake tasuki on {f.url} pairing code {a.code}", flush=True)
     try:
         while True:

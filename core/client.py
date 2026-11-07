@@ -21,9 +21,10 @@ UA = f"tasuki-hermes-plugin/{VERSION}"
 class TasukiError(Exception):
     """A short, safe-to-show failure. Never carries a token or response body."""
 
-    def __init__(self, message: str, status: int = 0, code: str = "") -> None:
+    def __init__(self, message: str, status: int = 0, code: str = "", extra: Optional[dict] = None) -> None:
         super().__init__(message)
         self.status, self.code = status, code
+        self.extra = extra or {}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -104,6 +105,16 @@ class HttpClient:
     def pair(self, code: str, name: str) -> dict:
         return self.request("POST", "/api/v1/agents/pair", auth=False, body={
             "code": code, "agent": {"kind": "hermes", "name": name, "version": VERSION, "capabilities": CAPABILITIES}})
+
+    def claim(self, secret: str, name: str) -> dict:
+        """Owner claim (POST /api/v1/owner/claim, no auth): trade the server's claim secret for an agent token with the assistant
+        scopes plus `enroll_device`. The secret travels only in this one request body."""
+        return self.request("POST", "/api/v1/owner/claim", auth=False, body={
+            "claim_secret": secret, "agent": {"kind": "hermes", "name": name, "version": VERSION, "capabilities": CAPABILITIES}})
+
+    def device_code(self, device_name: Optional[str] = None) -> dict:
+        """Mint a one-time phone enrolment code (POST /api/v1/agents/me/device-codes; needs the `enroll_device` scope)."""
+        return self.request("POST", "/api/v1/agents/me/device-codes", body={"device_name": device_name} if device_name else {}) or {}
 
     def next_delegation(self, wait: int = 25) -> Optional[dict]:
         r = self.request("GET", "/api/v1/agents/me/delegations/next", query={"wait": wait}, timeout=wait + 12)
