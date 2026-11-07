@@ -1,0 +1,22 @@
+name: tasuki
+manifest_version: 1
+version: 0.2.0
+description: "Tasuki Agent Gateway for Hermes: runs requests from the tasuki app in your own Hermes, and gives it read-only mail, calendar and food tools (mail is draft-only; nothing is ever sent), plus a read-only markdown mirror of your tasks and an inbox folder that turns dropped files into tasks."
+author: Franco Maisano
+kind: standalone
+platforms:
+  - linux
+  - macos
+provides_tools:
+  - tasuki_mail_conversations
+  - tasuki_mail_thread
+  - tasuki_mail_read
+  - tasuki_mail_draft_reply
+  - tasuki_calendar_events
+  - tasuki_calendar_free
+  - tasuki_calendar_summary
+  - tasuki_meeting_prep
+  - tasuki_food_day
+  - tasuki_food_week
+  - tasuki_food_recent
+  - tasuki_tasks_dir

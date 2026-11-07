@@ -1,0 +1,1 @@
+[The user has just CONFIRMED this out loud, so carry it out now: {summary}. Items: {items}. Do exactly this and nothing else, ask nothing further and write no PROPOSAL line. Then say in one short sentence what you did. Do not claim it worked unless the tool call actually succeeded. Original request: {request}]
