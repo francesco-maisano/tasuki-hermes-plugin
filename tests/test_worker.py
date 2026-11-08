@@ -88,6 +88,15 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(len(set(titles)), 3, titles)
             self.assertTrue(all(t.startswith("tasuki voice ") for t in titles))
 
+    def test_hold_to_ask_session_is_titled_from_what_was_said(self):
+        with Harness(None) as h:
+            h.srv.wait_events(h.srv.push("move the Northwind proposal to Friday and let Priya know about the new install window", surface="hold-to-ask"))
+            title = h.hermes.created[0]["title"]
+            self.assertTrue(title.startswith("tasuki: move the Northwind proposal"), title)
+            self.assertLessEqual(len(title), 60)
+            p = h.hermes.prompts[0][1]
+            self.assertNotIn("Voice reply rules", p["text"])                            # an ordinary prompt, not a voice turn
+
     def test_hermes_tool_lookup_is_not_announced(self):
         script = lambda t, s: [(0, "tool.start", {"name": "tool_search"}), (0, "tool.start", {"name": "tool_describe"}),
                                (0, "tool.start", {"name": "tool_call", "context": "tasuki_calendar_summary"}),

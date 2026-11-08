@@ -4,7 +4,7 @@ The agent-side half of tasuki's **Agent Gateway**. Installed into *your own* Her
 Hermes' dashboard API, or by hand), it lets the tasuki app hand a request to your main Hermes and hear the answer
 stream back, and it gives Hermes read-only tools for your mail, calendar and food log, and keeps a read-only markdown copy of your tasks inside the Hermes data directory (plus an inbox folder that turns dropped files into tasks).
 
-Version `0.4.0`, protocol version `1`. Native Hermes plugin (`plugin.yaml` + `register(ctx)`), MIT.
+Version `0.4.1`, protocol version `1`. Native Hermes plugin (`plugin.yaml` + `register(ctx)`), MIT.
 
 ## What it does
 

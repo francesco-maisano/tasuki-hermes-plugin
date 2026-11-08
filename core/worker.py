@@ -336,13 +336,13 @@ class DelegationWorker:
         except _Lost:
             pass
 
-    async def _session(self, sk: str) -> str:
+    async def _session(self, sk: str, d: Optional[dict] = None) -> str:
         sid = self._sessions.get(sk)
         if sid and self._bridge.known(sid):
             self._sessions.move_to_end(sk)
             return sid
         self._sessions.pop(sk, None)
-        title = self._title()
+        title = self._title(d)
         sid = await self._bridge.create_session(title, self.cwd)
         self._sessions[sk] = sid
         while len(self._sessions) > self.max_sessions:
@@ -352,10 +352,16 @@ class DelegationWorker:
             await self._bridge.close_session(self._sessions.pop(old_sk))
         return sid
 
-    def _title(self) -> str:
-        """'tasuki voice HH:MM'; Hermes refuses a duplicate title (it silently drops it), so a second session in the
-        same minute gets ' (2)', ' (3)'. Bounded: only the last few minutes are remembered."""
-        base = f"tasuki voice {dt.datetime.now().strftime('%H:%M')}"
+    def _title(self, d: Optional[dict] = None) -> str:
+        """'tasuki voice HH:MM' for a call; for "hold to ask" (the app's hold-the-voice-button request, a new ordinary session) the
+        first words of what was said, so it is findable in Hermes. Hermes refuses a duplicate title (it silently drops it), so a
+        second one in the same minute gets ' (2)', ' (3)'. Bounded: only the last few are remembered."""
+        if d and d.get("surface") == "hold-to-ask" and str(d.get("text") or "").strip():
+            words = " ".join(str(d["text"]).split())
+            short = words if len(words) <= 48 else words[:47].rsplit(" ", 1)[0] + "…"
+            base = f"tasuki: {short}"
+        else:
+            base = f"tasuki voice {dt.datetime.now().strftime('%H:%M')}"
         n = self._titles.get(base, 0) + 1
         self._titles[base] = n
         while len(self._titles) > 16:
@@ -383,7 +389,7 @@ class DelegationWorker:
             await self._emit_quiet(client, ctl, "error", "Stopped.", {"code": ctl.reason})
             return
         try:
-            sid = await self._session(sk)
+            sid = await self._session(sk, d)
             if sid in self._needs_settle:
                 self._needs_settle.discard(sid)
                 await self._bridge.settle(sid, 15)

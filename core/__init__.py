@@ -5,7 +5,7 @@ module name ``_tasuki_hermes_core``, so one process holds exactly one worker and
 """
 from __future__ import annotations
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 PROTOCOL_VERSION = 1
 # Onboarding features the dashboard API offers (status.features): the app checks these instead of guessing from the version.
 FEATURES = [
