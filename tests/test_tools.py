@@ -12,7 +12,7 @@ from _tasuki_hermes_core.client import HttpClient
 ROOT = Path(helpers.ROOT)
 EXPECTED = {"tasuki_mail_conversations", "tasuki_mail_thread", "tasuki_mail_read", "tasuki_mail_draft_reply",
             "tasuki_calendar_events", "tasuki_calendar_free", "tasuki_calendar_summary", "tasuki_meeting_prep",
-            "tasuki_food_day", "tasuki_food_week", "tasuki_food_recent", "tasuki_tasks_dir"}
+            "tasuki_food_day", "tasuki_food_week", "tasuki_food_recent", "tasuki_tasks_dir", "tasuki_health_summary", "tasuki_health_today"}
 
 
 class ToolTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class ToolTests(unittest.TestCase):
     def test_tool_list_is_exactly_the_read_set_and_has_no_send(self):
         names = {n for n, *_ in T.specs(self.tools)}
         self.assertEqual(names, EXPECTED)
-        self.assertEqual(len(names), 12)
+        self.assertEqual(len(names), 14)
         for n in names:
             self.assertTrue(n.startswith("tasuki_"))
             self.assertFalse(re.search(r"send|delete|forward|move|archive|flag|mark|remove|cancel|create_event|accept|decline", n), n)
@@ -50,7 +50,7 @@ class ToolTests(unittest.TestCase):
         writes = [(m, p) for m, p, _, _ in self.srv.bridge_calls if m != "GET"]
         self.assertEqual(writes, [("POST", "/mail/messages/M1/draft-reply")])
         src = (ROOT / "core" / "tools.py").read_text()
-        paths = set(re.findall(r'f?"(/(?:mail|calendar|food)/[^"]*)"', src))
+        paths = set(re.findall(r'f?"(/(?:mail|calendar|food|health)/[^"]*)"', src))
         self.assertGreaterEqual(len(paths), 8)
         for pth in paths:      # every path literal the tools use is on the client's allowlist
             norm = re.sub(r"\{[^}]*\}", "X", pth)
@@ -138,6 +138,35 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(d["data"]["remaining"]["calories"], 1850)
         self.assertEqual(self.call("tasuki_food_week")["data"]["logged_days"], 5)
         self.assertEqual(self.call("tasuki_food_recent")["data"]["items"][0]["name"], "Eggs")
+
+    def test_health_tools(self):
+        s = self.call("tasuki_health_summary", days=7)
+        self.assertTrue(s["ok"] and s["data"]["shared"])
+        self.assertNotIn("untrusted_content", s)
+        self.assertEqual(s["data"]["summary"]["steps_total"], 15580)
+        self.assertEqual(s["data"]["summary"]["nights_recorded"], 2)
+        self.assertEqual(s["data"]["summary"]["sleep_average_minutes"], 416.0)
+        self.assertEqual(s["data"]["summary"]["days_steps_goal_met"], 1)
+        self.assertEqual(s["data"]["summary"]["workouts"], 1)
+        self.assertEqual(s["data"]["as_of"], "2026-11-08T19:00:00+08:00")
+        q = [c for c in self.srv.bridge_calls if c[1] == "/health/days"][-1][2]
+        self.assertEqual(q.get("days"), "7")
+        self.call("tasuki_health_summary", start="2026-11-01", end="2026-11-08")
+        q = [c for c in self.srv.bridge_calls if c[1] == "/health/days"][-1][2]
+        self.assertEqual((q.get("start"), q.get("end"), q.get("days")), ("2026-11-01", "2026-11-08", None))
+        t = self.call("tasuki_health_today")
+        self.assertEqual(t["data"]["last_night"]["deep_min"], 62)
+        self.assertEqual(t["data"]["yesterday"]["steps"], 9100)
+
+    def test_health_not_shared_says_how_to_turn_it_on(self):
+        import fake_tasuki as F
+        saved = dict(F.HEALTH); F.HEALTH.clear(); F.HEALTH.update({"shared": False, "days": []})
+        try:
+            r = self.call("tasuki_health_today")
+            self.assertTrue(r["ok"]); self.assertFalse(r["data"]["shared"])
+            self.assertIn("Let your agent see your health", r["data"]["note"])
+        finally:
+            F.HEALTH.clear(); F.HEALTH.update(saved)
 
     def test_all_results_are_compact(self):
         for name, args in (("tasuki_mail_conversations", {}), ("tasuki_calendar_events", {}), ("tasuki_food_day", {})):

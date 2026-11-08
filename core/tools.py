@@ -348,6 +348,65 @@ class Tools:
         return self._run(go)
 
 
+    # ---- health (the daily summary the user chose to share from the tasuki iPhone app; their own data on their own server) ----
+    HEALTH_KEYS = ("steps", "distance_m", "active_kcal", "exercise_min", "resting_hr", "hrv_ms", "weight_kg")
+
+    @staticmethod
+    def _health_note(r: dict) -> dict:
+        if not r.get("shared"):
+            return {"shared": False, "note": "The user has not turned on sharing yet: tasuki app, Settings, Health, \"Let your agent see your health\". Say so; do not guess numbers."}
+        return {"shared": True, "as_of": r.get("as_of"), "tz": r.get("tz"),
+                "note": "Read from Apple Health on the user's iPhone at as_of (iOS cannot read Health while the phone is locked, so say how fresh it is when it is "
+                        "more than a few hours old). A missing field means no reading that day, never zero. Sleep is listed on the morning it ended. "
+                        "Sleep stages (rem/core/deep) exist only with an Apple Watch."}
+
+    def health_summary(self, args: dict, **_: Any) -> str:
+        def go(c):
+            q = {k: args.get(k) for k in ("start", "end") if args.get(k)}
+            if not q:
+                q["days"] = int(args.get("days") or 7)
+            r = c.bridge("GET", "/health/days", q) or {}
+            days = r.get("days") or []
+            out = self._health_note(r)
+            if not out["shared"]:
+                return envelope(out, untrusted=False)
+
+            def avg(vals):
+                vals = [v for v in vals if isinstance(v, (int, float))]
+                return round(sum(vals) / len(vals), 1) if vals else None
+            nights = [d["sleep"] for d in days if isinstance(d.get("sleep"), dict)]
+            workouts = [w for d in days for w in (d.get("workouts") or [])]
+            out.update({
+                "goals": {"steps": r.get("step_goal"), "sleep_minutes": r.get("sleep_goal_min")},
+                "days": days,
+                "summary": {
+                    "days_with_data": len(days),
+                    "steps_total": sum(d.get("steps") or 0 for d in days), "steps_average": avg([d.get("steps") for d in days]),
+                    "days_steps_goal_met": sum(1 for d in days if r.get("step_goal") and (d.get("steps") or 0) >= r["step_goal"]),
+                    "nights_recorded": len(nights), "sleep_average_minutes": avg([n.get("asleep_min") for n in nights]),
+                    "nights_sleep_goal_met": sum(1 for n in nights if r.get("sleep_goal_min") and (n.get("asleep_min") or 0) >= r["sleep_goal_min"] - 15),
+                    "resting_hr_average": avg([d.get("resting_hr") for d in days]), "hrv_average_ms": avg([d.get("hrv_ms") for d in days]),
+                    "weight_first_kg": next((d["weight_kg"] for d in days if d.get("weight_kg")), None),
+                    "weight_last_kg": next((d["weight_kg"] for d in reversed(days) if d.get("weight_kg")), None),
+                    "workouts": len(workouts), "workout_minutes": sum(w.get("minutes") or 0 for w in workouts)}})
+            return envelope(out, untrusted=False)
+        return self._run(go)
+
+    def health_today(self, args: dict, **_: Any) -> str:
+        def go(c):
+            r = c.bridge("GET", "/health/days", {"days": 2}) or {}
+            out = self._health_note(r)
+            if not out["shared"]:
+                return envelope(out, untrusted=False)
+            days = r.get("days") or []
+            today = days[-1] if days else None
+            out.update({"goals": {"steps": r.get("step_goal"), "sleep_minutes": r.get("sleep_goal_min")},
+                        "today": today, "yesterday": days[-2] if len(days) > 1 else None,
+                        "last_night": (today or {}).get("sleep")})
+            return envelope(out, untrusted=False)
+        return self._run(go)
+
+
 def _need(args: dict, key: str) -> str:
     v = str((args or {}).get(key) or "").strip()
     if not v:
@@ -409,4 +468,13 @@ def specs(t: Tools) -> list:
          "so you can read them directly with your file tools. Returns the folder path and how to use it. READ-ONLY; call it first when the "
          "user asks about their tasks.", _s({}), t.tasks_dir),
         ("tasuki_food_recent", "The foods the user eats most, for quick re-logging ideas. READ-ONLY.", _s({}), t.food_recent),
+        ("tasuki_health_summary",
+         "The user's Apple Health numbers per day from their iPhone (steps, distance, active energy, exercise minutes, sleep with stages and bed/wake "
+         "times, resting heart rate, HRV, weight, workouts) for a range, with totals and averages. Use for 'how did I sleep this week', 'my steps', "
+         "'resting heart rate trend'. Give start and end (YYYY-MM-DD, inclusive) or days (default 7). READ-ONLY; the user chose to share it.",
+         _s({"start": {"type": "string", "description": "YYYY-MM-DD"}, "end": {"type": "string", "description": "YYYY-MM-DD"},
+             "days": {"type": "integer", "description": "The last N days when no start is given (default 7, max 120)."}}), t.health_summary),
+        ("tasuki_health_today",
+         "Today so far from Apple Health (steps, activity, workouts) and last night's sleep, with yesterday for comparison and the goals. Use for "
+         "'how am I tracking today', 'how did I sleep last night'. READ-ONLY.", _s({}), t.health_today),
     ]

@@ -4,7 +4,7 @@ The agent-side half of tasuki's **Agent Gateway**. Installed into *your own* Her
 Hermes' dashboard API, or by hand), it lets the tasuki app hand a request to your main Hermes and hear the answer
 stream back, and it gives Hermes read-only tools for your mail, calendar and food log, and keeps a read-only markdown copy of your tasks inside the Hermes data directory (plus an inbox folder that turns dropped files into tasks).
 
-Version `0.3.0`, protocol version `1`. Native Hermes plugin (`plugin.yaml` + `register(ctx)`), MIT.
+Version `0.4.0`, protocol version `1`. Native Hermes plugin (`plugin.yaml` + `register(ctx)`), MIT.
 
 ## What it does
 
@@ -20,7 +20,12 @@ Version `0.3.0`, protocol version `1`. Native Hermes plugin (`plugin.yaml` + `re
 
 `tasuki_mail_conversations`, `tasuki_mail_thread`, `tasuki_mail_read`, `tasuki_mail_draft_reply`,
 `tasuki_calendar_events`, `tasuki_calendar_free`, `tasuki_calendar_summary`, `tasuki_meeting_prep`,
-`tasuki_food_day`, `tasuki_food_week`, `tasuki_food_recent`, `tasuki_tasks_dir`.
+`tasuki_food_day`, `tasuki_food_week`, `tasuki_food_recent`, `tasuki_tasks_dir`, `tasuki_health_summary`, `tasuki_health_today`.
+
+The two health tools (0.4.0, 08/11/2026) read the daily Apple Health summary the iPhone app sends to the bridge once the user turns on
+"Let your agent see your health" (Settings, Health): steps, activity, sleep with stages, resting heart rate, HRV, weight, workouts, per day, with
+`as_of` (when the phone read Health). It lives on the user's own bridge, next to their food log, and is read with the `food:read` scope.
+Until sharing is on, both tools say so instead of returning numbers.
 
 `tasuki_tasks_dir` returns the mirror folder and a paragraph telling Hermes it can read the task files directly with its file tools
 (`read_file`, `search_files`), that they are read-only, and how to create tasks (the inbox or the tasuki task tools).
@@ -32,7 +37,7 @@ hidden until the plugin is paired.
 ## What it can and cannot do
 
 * **Can:** read mail (conversations, threads, one message as plain text), read the calendar (events, free slots, today's
-  summary, meeting prep), read the food log, create a **reply draft** (Outlook or Gmail) and return its link.
+  summary, meeting prep), read the food log and the shared health summary, create a **reply draft** (Outlook or Gmail) and return its link.
 * **Cannot, by construction:** send, forward, delete, move, flag or mark mail; create, change or answer calendar events;
   write the food log. There is no such tool, and the HTTP client refuses any bridge call that is not on a short allowlist
   (`core/client.py` `ALLOWED_BRIDGE`; tests enumerate the tool list and the allowlist). A draft is the only write, and the

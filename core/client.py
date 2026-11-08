@@ -155,6 +155,7 @@ ALLOWED_BRIDGE = (
     ("GET", re.compile(r"^/calendar/(events|free|summary)$")),
     ("GET", re.compile(rf"^/calendar/events/{_ID}/prep$")),
     ("GET", re.compile(r"^/food/(day|week|recent)$")),
+    ("GET", re.compile(r"^/health/days$")),                             # the shared daily health summary, read only
 )
 
 

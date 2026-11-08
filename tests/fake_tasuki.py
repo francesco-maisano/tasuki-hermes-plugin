@@ -69,6 +69,11 @@ FOOD_DAY = {"date": "2026-11-07", "meals": [{"meal": "breakfast", "entries": [{"
             "totals": {"calories": 150, "protein_g": 12}, "targets": {"calories": 2000, "protein_g": 150}, "remaining": {"calories": 1850, "protein_g": 138}}
 FOOD_WEEK = {"start": "2026-11-01", "end": "2026-11-07", "days": [{"date": "2026-11-07", "logged": True, "totals": {"calories": 150}}], "targets": {"calories": 2000},
              "average": {"calories": 1800}, "logged_days": 5}
+HEALTH = {"shared": True, "as_of": "2026-11-08T19:00:00+08:00", "tz": "Australia/Perth", "step_goal": 8000, "sleep_goal_min": 450, "days": [
+    {"date": "2026-11-07", "steps": 9100, "sleep": {"asleep_min": 400, "in_bed_min": 430, "awake_min": 30, "fell_asleep": "23:40", "woke_up": "06:30"}, "resting_hr": 60},
+    {"date": "2026-11-08", "steps": 6480, "exercise_min": 34, "resting_hr": 58, "hrv_ms": 46.2, "weight_kg": 82.4,
+     "sleep": {"asleep_min": 432, "in_bed_min": 468, "awake_min": 26, "rem_min": 110, "core_min": 260, "deep_min": 62, "fell_asleep": "23:10", "woke_up": "06:42"},
+     "workouts": [{"type": "walk", "start": "07:40", "minutes": 38}]}]}
 FOOD_RECENT = {"items": [{"name": "Eggs", "qty": "2", "last_weight": 100, "meal": "breakfast", "n": 9, "calories": 150}]}
 DRAFT = {"draft_id": "D1", "conversation_id": "C1", "subject": "Re: Quote for Moora", "to": ["brett@example.com"], "cc": [], "body_preview": "Thanks Brett, ...",
          "web_link": "https://outlook.office.com/mail/drafts/D1", "generated": True, "notes": [], "reply_all": True, "sent": False}
@@ -308,7 +313,7 @@ class FakeTasuki:
                 outer.bridge_calls.append((method, path, q, body))
                 routes = {"/mail/accounts": MAIL_ACCOUNTS, "/mail/conversations": CONVERSATIONS, "/calendar/events": EVENTS,
                           "/calendar/free": FREE, "/calendar/summary": SUMMARY, "/food/day": FOOD_DAY, "/food/week": FOOD_WEEK,
-                          "/food/recent": FOOD_RECENT}
+                          "/food/recent": FOOD_RECENT, "/health/days": HEALTH}
                 if method == "GET" and path in routes:
                     return self._send(200, routes[path])
                 if method == "GET" and path.startswith("/mail/threads/"):

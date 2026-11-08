@@ -116,7 +116,7 @@ class RegisterAndApiTests(unittest.TestCase):
             def register_hook(self, *a, **k):
                 raise AssertionError("v0 registers no hooks")
         mod.register(Ctx())
-        self.assertEqual(len(calls), 12)
+        self.assertEqual(len(calls), 14)
         for kw in calls:
             self.assertEqual(kw["toolset"], "tasuki")
             self.assertTrue(kw["name"].startswith("tasuki_"))

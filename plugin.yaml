@@ -1,7 +1,7 @@
 name: tasuki
 manifest_version: 1
-version: 0.3.0
-description: "Tasuki Agent Gateway for Hermes: runs requests from the tasuki app in your own Hermes, and gives it read-only mail, calendar and food tools (mail is draft-only; nothing is ever sent), plus a read-only markdown mirror of your tasks and an inbox folder that turns dropped files into tasks."
+version: 0.4.0
+description: "Tasuki Agent Gateway for Hermes: runs requests from the tasuki app in your own Hermes, and gives it read-only mail, calendar, food and health tools (mail is draft-only; nothing is ever sent), plus a read-only markdown mirror of your tasks and an inbox folder that turns dropped files into tasks."
 author: Franco Maisano
 kind: standalone
 platforms:
@@ -19,4 +19,6 @@ provides_tools:
   - tasuki_food_day
   - tasuki_food_week
   - tasuki_food_recent
+  - tasuki_health_summary
+  - tasuki_health_today
   - tasuki_tasks_dir
